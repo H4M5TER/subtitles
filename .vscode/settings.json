@@ -1,0 +1,11 @@
+{
+  "files.eol": "\n",
+  "[python]": {
+    "editor.indentSize": 4,
+    "editor.tabSize": 4,
+  },
+  "[mo-python]": {
+    "editor.indentSize": 4,
+    "editor.tabSize": 4,
+  },
+}

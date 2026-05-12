@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.23.5"
+__generated_with = "0.23.6"
 app = marimo.App(width="medium")
 
 with app.setup:
@@ -8,6 +8,19 @@ with app.setup:
     import stable_whisper
     import math
     import numpy as np
+
+
+@app.cell
+def _():
+    if mo.app_meta().mode == "edit":
+        from pathlib import Path
+
+        artifact = r""
+        artifact = Path(artifact)
+        result = stable_whisper.WhisperResult(str(artifact))
+        regroup_en(result)
+        mo.output.append(result.segments[-20:])
+    return
 
 
 @app.function
@@ -20,12 +33,20 @@ def regroup_en(result: stable_whisper.WhisperResult):
         [(".", " "), "。", "?", "？"],  # type: ignore
         lock=True,
     )
+    result.custom_operation(
+        "word",
+        "in",
+        [" LLMs.", " GUI."],  # special periods white list
+        "splitright",
+        word_level=True,
+    )
     result.custom_operation("len=text", ">", 50, split_comma, word_level=False)
     result.custom_operation("len=text", ">", 50, split_clause, word_level=False)
     result.custom_operation("len=text", ">", 50, split_fanboy, word_level=False)
 
-    exceeded = [s for s in result.segments if len(s.text) > 80]
-    mo.output.append(exceeded)
+    if mo.app_meta().mode == "edit":
+        exceeded = [s for s in result.segments if len(s.text) > 80]
+        mo.output.append(exceeded)
     result.split_by_length(80)
     result.clamp_max()
 
@@ -38,6 +59,7 @@ def recursive_split_segment(
     seg_index,
     candidates: list[int],
     max_chars=60,
+    min_chars=20,
 ):
     segment = result[seg_index]
     if not segment.has_words:
@@ -65,7 +87,8 @@ def recursive_split_segment(
         filtered_candidates = [
             i
             for i in sorted_candidates
-            if min(cumsum[i - start], char_total - cumsum[i - start]) >= 20
+            if (id := i - start) >= 0
+            if min(cumsum[id], char_total - cumsum[id]) >= min_chars
         ]
         if not filtered_candidates:
             return
@@ -81,7 +104,7 @@ def recursive_split_segment(
 
 @app.function
 def split_comma(result: stable_whisper.WhisperResult, seg_index, word_index):
-    candidates = result[seg_index].get_punctuation_indices([(",", " "), "，"])
+    candidates = result[seg_index].get_punctuation_indices([(",", " "), "，"])  # type: ignore
     # get_punctuation_indices excluded locked indices
     recursive_split_segment(result, seg_index, candidates)
 
@@ -92,12 +115,12 @@ def split_conjunctions(result: stable_whisper.WhisperResult, seg_index, conjunct
     segment = result[seg_index]
     locked_split_indices = segment.get_locked_indices()
     for conj in conjunctions:
-        for split_index, word_timing in enumerate(segment.words[1:]):
+        for split_index, word_timing in enumerate(segment.words[1:]):  # type:ignore
             # split_index equals real word index - 1
             # because we want split before conj
             if split_index in locked_split_indices:
                 continue
-            if word_timing.word.strip() == conj:
+            if word_timing.word.strip() == conj:  # type: ignore
                 # just strip spaces
                 # ignore words with punctuation
                 # case sensitive

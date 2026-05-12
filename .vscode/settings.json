@@ -1,5 +1,9 @@
 {
   "files.eol": "\n",
+  "explorer.fileNesting.enabled": true,
+  "explorer.fileNesting.patterns": {
+    "*.webm": "${capture}.*",
+  },
   "[python]": {
     "editor.indentSize": 4,
     "editor.tabSize": 4,

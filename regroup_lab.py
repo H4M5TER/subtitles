@@ -17,11 +17,15 @@ with app.setup:
     import polars_ds as pds
     from polars_ds.pipeline.transforms import scale
 
+    import plotly
     import plotly.express as px
+    import plotly.graph_objects as go
+    from wigglystuff import GraphWidget
 
     import stable_whisper
     from stable_whisper import WhisperResult
     import spacy
+    from spacy import displacy
     import benepar
     import nltk
     from nltk import Tree, ParentedTree
@@ -188,7 +192,76 @@ def spacy_to_whisper(
     return whisper_bounds
 
 
-@app.cell(column=3)
+@app.cell(column=3, hide_code=True)
+def _(
+    bound_before_labels,
+    colorscale,
+    colorscale2,
+    transition,
+    transition_best,
+):
+    layout = dict(
+        width=500,
+        height=500,
+        autosize=False,
+        yaxis_scaleanchor="x",
+    )
+    transition_labels = bound_before_labels + ["EOS"]
+
+    heatmap1 = go.Figure(
+        go.Heatmap(
+            z=pl.from_numpy(transition),
+            x=transition_labels,
+            y=transition_labels,
+            colorscale=colorscale,
+        ),
+        layout=layout,
+    )
+    heatmap2 = go.Figure(
+        go.Heatmap(
+            z=pl.from_numpy(transition_best),
+            x=transition_labels,
+            y=transition_labels,
+            colorscale=colorscale2,
+        ),
+        layout=layout,
+    )
+    mo.hstack([heatmap1, heatmap2])
+    return
+
+
+@app.cell
+def _(transition, transition_best):
+    quantiles = [0, 1, 2, 3, 5, 10, 25, 50, 75, 100]
+    colors = plotly.colors.sequential.Viridis
+
+    scales = np.nanpercentile(transition.flatten(), quantiles)
+    scales = np.interp(scales, (scales.min(), scales.max()), (0, 1))
+    colorscale = list(zip(scales, colors))
+
+    scales2 = np.nanpercentile(transition_best.flatten(), quantiles)
+    scales2 = np.interp(scales2, (scales2.min(), scales2.max()), (0, 1))
+    colorscale2 = list(zip(scales2, colors))
+    # colorscale2 = colorscale
+    return colorscale, colorscale2
+
+
+@app.cell
+def _(sent):
+    append(sent._.parse_string)
+    root = ParentedTree.fromstring(sent._.parse_string)
+    append(root)  # need svgling
+    root.pretty_print()
+    return
+
+
+@app.cell
+def _(sent):
+    mo.Html(displacy.render(sent, style="dep"))
+    return
+
+
+@app.cell(column=4, hide_code=True)
 def _(
     widget_len_floor,
     widget_len_target,
@@ -224,23 +297,11 @@ def _(
     spacy_bounds, transition, dp, prev = comp_dp(
         df, len_target, len_floor, semantic_weight, length_weight, split_penalty_weight
     )
-    transition = pl.from_numpy(
-        transition,
-        schema=df.with_row_index()
-        .with_columns(
-            [
-                pl.concat_str(
-                    pl.col("index"),
-                    pl.col("spacy_tokens"),
-                ).alias("word")
-            ]
-        )
-        .select("word")
-        .to_series()
-        .to_list(),
-    )
-    px.imshow(transition)
-    # transition
+    transition_best = [
+        [transition[i][j] if prev[j] == i else np.nan for j in range(n_tokens)]
+        for i in range(n_tokens)
+    ]
+    transition_best = np.array(transition_best)
     return spacy_bounds, transition
 
 

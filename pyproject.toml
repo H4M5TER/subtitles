@@ -18,11 +18,13 @@ dependencies = [
   "qwen-asr>=0.0.6",
   "spacy>=3.8.14",
   "stable-ts[fw]>=2.19.1",
+  "svgling>=0.5.0",
   "torch==2.10.0",
   "torchaudio==2.10.0",
   "torchvision",
   "transformers<5", # build_inputs_with_special_tokens removed
   "typer>=0.25.1",
+  "wigglystuff>=0.5.9",
   "yt-dlp[default]>=2026.3.17",
 ]
 

@@ -9,10 +9,13 @@ with app.setup:
 
     import re
     from pathlib import Path
+    from typing import Optional
 
     import math
     import numpy as np
     import polars as pl
+    import polars_ds as pds
+    from polars_ds.pipeline.transforms import scale
 
     import plotly.express as px
 
@@ -44,16 +47,18 @@ def _():
     widget_split_penalty = mo.ui.number(
         0, 1000, value=100, step=1, label="Split penalty weight (%)"
     )
+    widget_length = mo.ui.number(0, 1000, value=100, step=1, label="Length weight (%)")
 
     mo.vstack(
         [
             mo.hstack([widget_len_target, widget_len_floor]),
-            mo.hstack([widget_semantic, widget_split_penalty]),
+            mo.hstack([widget_semantic, widget_length, widget_split_penalty]),
         ]
     )
     return (
         widget_len_floor,
         widget_len_target,
+        widget_length,
         widget_semantic,
         widget_split_penalty,
     )
@@ -116,7 +121,7 @@ def _():
     return result_path, use_input
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(result_path, use_input):
     result = []
     if not use_input.value:
@@ -153,7 +158,9 @@ def _(df, spacy_bounds):
     spacy_group = (
         df.select("spacy_tokens")
         .with_row_index()
-        .with_columns(pl.col("index").cut(breaks=spacy_bounds).alias("group"))
+        .with_columns(
+            pl.col("index").cut(breaks=spacy_bounds, left_closed=True).alias("group")
+        )
         .group_by("group", maintain_order=True)
         .agg(pl.col("spacy_tokens").str.join(" ").alias("segment"))
     )
@@ -174,7 +181,7 @@ def spacy_to_whisper(
         #       ^ doc level
         for i in spacy_bounds
     ]
-    whisper_bounds = [np.searchsorted(cumsum, i, side="right") for i in whisper_bounds]
+    whisper_bounds = [np.searchsorted(cumsum, i) for i in whisper_bounds]
     whisper_bounds = [i for i in whisper_bounds if 0 <= i < len(segment.words)]
     whisper_bounds = sorted(list(set(whisper_bounds)))
     # unsort indices break splitting by stable_whisper
@@ -185,6 +192,7 @@ def spacy_to_whisper(
 def _(
     widget_len_floor,
     widget_len_target,
+    widget_length,
     widget_semantic,
     widget_split_penalty,
 ):
@@ -192,10 +200,12 @@ def _(
     len_floor = widget_len_floor.value
 
     semantic_weight = widget_semantic.value / 100
+    length_weight = widget_length.value / 100
     split_penalty_weight = widget_split_penalty.value / 100
     return (
         len_floor,
         len_target,
+        length_weight,
         semantic_weight,
         split_penalty_weight,
     )
@@ -206,12 +216,13 @@ def _(
     df,
     len_floor,
     len_target,
+    length_weight,
     n_tokens,
     semantic_weight,
     split_penalty_weight,
 ):
     spacy_bounds, transition, dp, prev = comp_dp(
-        df, len_target, len_floor, semantic_weight, split_penalty_weight
+        df, len_target, len_floor, semantic_weight, length_weight, split_penalty_weight
     )
     transition = pl.from_numpy(
         transition,
@@ -263,13 +274,161 @@ def _(bound_before_labels, df):
     return
 
 
-@app.cell(column=4)
-def _(len_floor, len_target):
+@app.function
+def comp_dp(
+    df: pl.DataFrame,
+    len_target: int,
+    len_floor: int,
+    semantic_weight: Optional[float] = 1,
+    length_weight: Optional[float] = 1,
+    split_penalty_weight: Optional[float] = 1,
+) -> tuple[list[int], np.ndarray, list[float], list[int]]:
+    n_tokens = df.shape[0]
+    n_bounds = n_tokens - 1
+    cumsum = df.select("spacy_cumsum").to_series().to_list()
+    n_char_total = cumsum[-1]
+    semantic_costs = df.select("z_semantic_cost").to_series().to_list()
+    # semantic_costs[i] 代表以第 i 个 token 之后作为分割边界的语义成本，1-indexed
+    split_penalty_weight *= len_target / n_char_total
+
+    best = [1e12] * n_tokens
+    best[0] = 0.0
+    # 有两种方式解释 best 的索引：
+    # 1.1 best[i] 代表 token[0,i) 的最佳分割成本，0-indexed
+    # 1.2 best[i] 代表以第 i 个 token 之前作为分割边界的最佳分割成本，0-indexed
+    # 2.1 best[i] 代表 token[1,i] 的最佳分割成本，1-indexed
+    # 2.2 best[i] 代表以第 i 个 token 之后作为分割边界的最佳分割成本，1-indexed
+    prev = [-1] * n_tokens
+    jumps = [0] * n_tokens
+    transition = np.full((n_tokens, n_tokens), np.nan)
+
+    for cur_split_bound in range(1, n_bounds + 1):  # [1,n_bounds + 1)
+        for last_split_bound in range(cur_split_bound):  # [0,n_bounds)
+            jump = jumps[last_split_bound] + 1
+            cost = split_penalty_weight * jump
+            n_char = cumsum[cur_split_bound - 1]
+            if last_split_bound > 0:
+                n_char -= cumsum[last_split_bound - 1]
+            # 两个 split_bound 都是偏移了+1的分割边界
+            # 边界 i 分割 token[i] 和 token[i+1]
+            # cumsum 是 token 字符数的前缀和，和 token 的索引对齐
+            # 因此偏移-1得到split_bound之前的字符数
+            len_penalty = length_weight * len_cost(n_char, len_target)
+            if False:
+                cost *= 1 + len_penalty
+            else:
+                cost += len_penalty
+
+            semantic_cost = semantic_weight * semantic_costs[last_split_bound]
+            cost -= semantic_cost
+
+            cost += best[last_split_bound]
+            transition[last_split_bound][cur_split_bound] = cost
+            if cost < best[cur_split_bound]:
+                best[cur_split_bound] = cost
+                prev[cur_split_bound] = last_split_bound
+                jumps[cur_split_bound] = jump
+
+    cur = n_bounds
+    boundaries = []
+    while prev[cur] > 0:
+        boundaries.append(prev[cur])
+        cur = prev[cur]
+    boundaries.reverse()
+
+    return boundaries, transition, best, prev
+
+
+@app.function(column=5)
+def prepare(sent):
+    if isinstance(sent, str):
+        nlp = get_benepar_pipeline()
+        doc = nlp(sent.strip())
+        sent = list(doc.sents)[0]
+
+    n_tokens = len(sent)
+    df = pl.DataFrame(
+        {
+            "x": range(n_tokens),
+            "dist_tree": comp_dist_tree(sent),
+            "dist_depth": comp_dist_depth(sent),
+            "spacy_tokens": [t.text for t in sent],
+        }
+    )
+    df = df.with_columns(
+        [
+            pl.col("spacy_tokens").str.len_chars().alias("spacy_chars"),
+            pds.z_normalize("dist_tree").alias("z_dist_tree"),
+            pds.z_normalize("dist_depth").alias("z_dist_depth"),
+        ]
+    )
+    df = df.with_columns(
+        [
+            pl.col("spacy_chars").cum_sum().alias("spacy_cumsum"),
+            (pl.col("dist_tree") + pl.col("dist_depth")).alias("semantic_cost"),
+            (pl.col("z_dist_tree") + pl.col("z_dist_depth")).alias("z_semantic_cost"),
+        ]
+    )
+    return df
+
+
+@app.function
+def comp_dist_tree(sent) -> list[int]:
+    tree = ParentedTree.fromstring(sent._.parse_string)
+    leaves = tree.leaves()
+    # sent 以空格为第一个 token 时，tree.leaves 并不会包含空格
+    # 因此少一个 token，导致 n_leaves = n_tokens + 1
+    # 这其实是非常奇怪的，因为 tree 里仍然存在空格
+    n_leaves = len(leaves)
+    n_tokens = len(sent)
+    n_bounds = n_leaves - 1
+    distances = []
+    for i in range(n_bounds):
+        path_l = tree.leaf_treeposition(i)
+        path_r = tree.leaf_treeposition(i + 1)
+        lca_depth = sum(1 for a, b in zip(path_l, path_r) if a == b)
+        len_l = len(path_l) - lca_depth
+        len_r = len(path_r) - lca_depth
+        dist = len_l + len_r
+        distances.append(dist)
+    distances[-1] = 0  # 去除句号异常值
+
+    leading_space = sent[0].text.strip() == ""
+    leading_space &= n_leaves + 1 == n_tokens
+    if leading_space:
+        distances = [0] + distances
+    return [0] + distances
+
+
+@app.function
+def comp_dist_depth(sent) -> list[int]:
+    n_tokens = len(sent)
+    depths = []
+    for k in range(n_tokens):
+        depth = 0
+        for span in sent._.constituents:
+            if span.start <= k + sent.start < span.end:
+                depth += 1
+        depths.append(depth)
+    depths[-1] = depths[-2]  # 去除句号异常值
+    distances = np.diff(depths, prepend=depths[0])
+    # 填充一个位置，和动态规划的索引对齐，保持 distances[0] = 0
+    return np.abs(distances)
+
+
+@app.cell(hide_code=True)
+def _(len_target):
     from functools import partial
 
     len_cost_col = (
         pl.col("n_char")
-        .map_elements(partial(len_cost, target=len_target, floor=len_floor))
+        .map_elements(
+            partial(
+                len_cost,
+                target=len_target,
+                # floor=len_floor,
+            )
+        )
         .alias("len_cost")
     )
     len_cost_map = pl.DataFrame(
@@ -283,186 +442,12 @@ def _(len_floor, len_target):
 def len_cost(
     n_char: int,
     target: int,
-    floor: int,
 ) -> float:
-    return len_cost_3(n_char, target, floor)
-
-
-@app.function
-def len_cost_3(
-    n_char: int,
-    target: int,
-    floor: int,
-) -> float:
-    if floor <= n_char <= target:
-        return 0.0
-    delta = n_char - target
-    cost = abs(delta)
-    cost = float(cost)
-    if n_char < floor:
-        short_penalty = ((target - n_char) / target) ** 2
-        short_penalty *= target / floor
-        short_penalty *= target
-        cost += short_penalty
+    relative = n_char / target - 1
+    if relative < 0:
+        relative *= 2  # 提前在 1/2 处就达到 1
+    cost = relative**2
     return cost
-
-
-@app.function
-def len_cost_2(
-    n_char: int,
-    target: int,
-    floor: int,
-) -> float:
-    rel = n_char / target
-    short_penalty = 0
-    if n_char < target:
-        short_penalty = ((target - n_char) / target) ** 2
-        short_penalty *= target / floor
-        short_penalty *= target
-    cost = (rel - 1) ** 2 + short_penalty
-    return cost
-
-
-@app.function
-def len_cost_1(
-    n_char: int,
-    target: int,
-    floor: int,
-) -> float:
-    delta = n_char - target
-    cost = abs(delta)
-    if n_char < floor:
-        cost **= 2
-    return cost
-
-
-@app.function
-def comp_dp(
-    df: pl.DataFrame,
-    len_target: int,
-    len_floor: int,
-    semantic_weight: float,
-    split_penalty_base: float,
-) -> tuple[list[int], np.ndarray, list[float], list[int]]:
-    n_tokens = df.shape[0]
-    n_bounds = n_tokens - 1
-    cumsum = df.select("spacy_cumsum").to_series().to_list()
-    n_char_total = cumsum[-1]
-
-    segments = pl.DataFrame(range(n_tokens))
-    segments = (
-        segments.join(segments, how="cross")
-        .rename({"column_0": "start", "column_0_right": "end"})
-        .filter(pl.col("start") < pl.col("end"))
-    )  #       ^ [0,n_bounds)   ^ [1,n_bounds+1]
-
-    dp = [1e12] * n_tokens
-    dp[0] = 0.0
-    prev = [-1] * n_tokens
-    jump = [0] * n_tokens
-    transition = np.full((n_tokens, n_tokens), np.nan)
-
-    for start, end in segments.iter_rows():
-        n_char = cumsum[end]
-        if start > 0:
-            n_char -= cumsum[start]
-        cost = len_cost(n_char, len_target, len_floor)
-        if start > 0:
-            semantic_cost = df.item(start, "norm_semantic_cost")
-            cost += semantic_weight * semantic_cost
-        cost += jump[start] * split_penalty_base / n_char_total
-        cost += dp[start]
-        transition[end][start] = cost
-        if cost < dp[end]:
-            dp[end] = cost
-            prev[end] = start
-            jump[end] = jump[start] + 1
-
-    cur = n_bounds
-    boundaries = []
-    while prev[cur] > 0:
-        boundaries.append(prev[cur])
-        cur = prev[cur]
-    boundaries.reverse()
-
-    return boundaries, transition, dp, prev
-
-
-@app.function(column=5)
-def prepare(sent):
-    if isinstance(sent, str):
-        nlp = get_benepar_pipeline()
-        doc = nlp(sent.strip())
-        sent = list(doc.sents)[0]
-
-    df = (
-        pl.DataFrame(
-            {
-                "x": range(len(sent)),
-                "distance": comp_distances(sent),
-                "depth": comp_depths(sent),
-                "spacy_tokens": [t.text for t in sent],
-            }
-        )
-        .with_columns([pl.col("spacy_tokens").str.len_chars().alias("spacy_chars")])
-        .with_columns([pl.col("spacy_chars").cum_sum().alias("spacy_cumsum")])
-    )
-    dist, depth = pl.col("distance"), pl.col("depth")
-    m_dist, m_depth = dist.mean(), depth.mean()
-    s_dist, s_depth = dist.std(), depth.std()
-    df = df.with_columns(
-        [
-            (dist / s_dist).alias("norm_dist"),
-            (depth / s_depth).alias("norm_depth"),
-            ((dist - m_dist) / s_dist).alias("z_dist"),
-            ((depth - m_depth) / s_depth).alias("z_depth"),
-        ]
-    )
-    df = df.with_columns(
-        [
-            (pl.col("depth") - pl.col("distance")).alias("semantic_cost"),
-            (pl.col("norm_depth") - pl.col("norm_dist")).alias("norm_semantic_cost"),
-            (pl.col("z_depth") - pl.col("z_dist")).alias("z_semantic_cost"),
-        ]
-    )
-    return df
-
-
-@app.function
-def comp_distances(sent):
-    tree = ParentedTree.fromstring(sent._.parse_string)
-    leaves = tree.leaves()
-    n_leaves = len(leaves)
-    n_tokens = len(sent)
-    n_bounds = n_leaves - 1
-    distances = []
-    for i in range(n_bounds):
-        path_l = tree.leaf_treeposition(i)
-        path_r = tree.leaf_treeposition(i + 1)
-        lca_depth = sum(1 for a, b in zip(path_l, path_r) if a == b)
-        len_l = len(path_l) - lca_depth
-        len_r = len(path_r) - lca_depth
-        dist = len_l + len_r + 1
-        distances.append(dist)
-    leading_space = sent[0].text.strip() == ""
-    leading_space &= n_leaves + 1 == n_tokens
-    if leading_space:
-        distances = [0] + distances
-    return distances + [0]
-
-
-@app.function
-def comp_depths(sent):
-    n_tokens = len(sent)
-    n_bounds = n_tokens - 1
-    depths = []
-    for k in range(n_bounds):
-        depth = 0
-        for span in sent._.constituents:
-            if span.start <= k + sent.start < span.end:
-                depth += 1
-        depths.append(depth)
-    return depths + [0]
 
 
 if __name__ == "__main__":

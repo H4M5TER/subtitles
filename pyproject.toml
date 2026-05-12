@@ -12,6 +12,7 @@ dependencies = [
   "openai>=2.36.0",
   "plotly>=6.8.0",
   "polars>=1.41.2",
+  "polars-ds[plot]>=0.12.0",
   "pysubs2>=1.8.1",
   "python-dotenv>=1.2.2",
   "qwen-asr>=0.0.6",

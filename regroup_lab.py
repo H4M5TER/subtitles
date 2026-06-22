@@ -201,8 +201,8 @@ def _(
     transition_best,
 ):
     layout = dict(
-        width=500,
-        height=500,
+        width=800,
+        height=800,
         autosize=False,
         yaxis_scaleanchor="x",
     )
@@ -298,8 +298,8 @@ def _(
         df, len_target, len_floor, semantic_weight, length_weight, split_penalty_weight
     )
     transition_best = [
-        [transition[i][j] if prev[j] == i else np.nan for j in range(n_tokens)]
-        for i in range(n_tokens)
+        [transition[i][j] if prev[j] == i else np.nan for j in range(n_tokens + 1)]
+        for i in range(n_tokens + 1)
     ]
     transition_best = np.array(transition_best)
     return spacy_bounds, transition
@@ -328,6 +328,7 @@ def _(bound_before_labels, df):
             )
             for prefix in (
                 "",
+                "norm_",
                 "z_",
             )
         ],
@@ -345,35 +346,28 @@ def comp_dp(
     split_penalty_weight: Optional[float] = 1,
 ) -> tuple[list[int], np.ndarray, list[float], list[int]]:
     n_tokens = df.shape[0]
-    n_bounds = n_tokens - 1
+    n_bounds = n_tokens + 1  # 含首尾
     cumsum = df.select("spacy_cumsum").to_series().to_list()
+    cumsum = [0] + cumsum  # 填充到 1-indexed 和 cur_split_bound 对齐
     n_char_total = cumsum[-1]
-    semantic_costs = df.select("z_semantic_cost").to_series().to_list()
-    # semantic_costs[i] 代表以第 i 个 token 之后作为分割边界的语义成本，1-indexed
+    semantic_costs = df.select("norm_semantic_cost").to_series().to_list()
+    # 代表第 i 个边界(含首)的语义成本, 0-indexed
+    # 或代表以第 i 个 token 之后作为分割边界的语义成本, 1-indexed
     split_penalty_weight *= len_target / n_char_total
 
-    best = [1e12] * n_tokens
+    best = [1e12] * n_bounds
     best[0] = 0.0
-    # 有两种方式解释 best 的索引：
-    # 1.1 best[i] 代表 token[0,i) 的最佳分割成本，0-indexed
-    # 1.2 best[i] 代表以第 i 个 token 之前作为分割边界的最佳分割成本，0-indexed
-    # 2.1 best[i] 代表 token[1,i] 的最佳分割成本，1-indexed
-    # 2.2 best[i] 代表以第 i 个 token 之后作为分割边界的最佳分割成本，1-indexed
-    prev = [-1] * n_tokens
-    jumps = [0] * n_tokens
-    transition = np.full((n_tokens, n_tokens), np.nan)
+    # 代表 token[0,i) 的最佳分割成本, 0-indexed
+    # 从所有 transition 中取优
+    prev = [-1] * n_bounds
+    jumps = [0] * n_bounds
+    transition = np.full((n_bounds, n_bounds), np.nan)
 
-    for cur_split_bound in range(1, n_bounds + 1):  # [1,n_bounds + 1)
-        for last_split_bound in range(cur_split_bound):  # [0,n_bounds)
+    for cur_split_bound in range(1, n_bounds):  # 不含首
+        for last_split_bound in range(cur_split_bound):  # 不含尾
             jump = jumps[last_split_bound] + 1
             cost = split_penalty_weight * jump
-            n_char = cumsum[cur_split_bound - 1]
-            if last_split_bound > 0:
-                n_char -= cumsum[last_split_bound - 1]
-            # 两个 split_bound 都是偏移了+1的分割边界
-            # 边界 i 分割 token[i] 和 token[i+1]
-            # cumsum 是 token 字符数的前缀和，和 token 的索引对齐
-            # 因此偏移-1得到split_bound之前的字符数
+            n_char = cumsum[cur_split_bound] - cumsum[last_split_bound]
             len_penalty = length_weight * len_cost(n_char, len_target)
             if False:
                 cost *= 1 + len_penalty
@@ -381,16 +375,18 @@ def comp_dp(
                 cost += len_penalty
 
             semantic_cost = semantic_weight * semantic_costs[last_split_bound]
+            # 注意这是上一个切分点的语义成本
             cost -= semantic_cost
 
             cost += best[last_split_bound]
             transition[last_split_bound][cur_split_bound] = cost
+            transition[cur_split_bound][last_split_bound] = cost
             if cost < best[cur_split_bound]:
                 best[cur_split_bound] = cost
                 prev[cur_split_bound] = last_split_bound
                 jumps[cur_split_bound] = jump
 
-    cur = n_bounds
+    cur = -1
     boundaries = []
     while prev[cur] > 0:
         boundaries.append(prev[cur])
@@ -419,6 +415,9 @@ def prepare(sent):
     df = df.with_columns(
         [
             pl.col("spacy_tokens").str.len_chars().alias("spacy_chars"),
+            (pl.col("dist_tree") + pl.col("dist_depth")).alias("semantic_cost"),
+            minmax_normalize("dist_tree").alias("norm_dist_tree"),
+            minmax_normalize("dist_depth").alias("norm_dist_depth"),
             pds.z_normalize("dist_tree").alias("z_dist_tree"),
             pds.z_normalize("dist_depth").alias("z_dist_depth"),
         ]
@@ -426,11 +425,29 @@ def prepare(sent):
     df = df.with_columns(
         [
             pl.col("spacy_chars").cum_sum().alias("spacy_cumsum"),
-            (pl.col("dist_tree") + pl.col("dist_depth")).alias("semantic_cost"),
-            (pl.col("z_dist_tree") + pl.col("z_dist_depth")).alias("z_semantic_cost"),
+            minmax_normalize(
+                pl.col("dist_tree") + pl.col("dist_depth"),
+            ).alias("norm_semantic_cost"),
+            pds.z_normalize(
+                pl.col("dist_tree") + pl.col("dist_depth"),
+            ).alias("z_semantic_cost"),
+            # z_score 会丢失零点
         ]
     )
     return df
+
+
+@app.function
+def minmax_normalize(x: str | pl.Expr, l: float = 0, r: float = 1) -> pl.Expr:
+    if isinstance(x, str):
+        x = pl.col(x)
+    min_ = x.min()
+    max_ = x.max()
+    res = (x - min_) / (max_ - min_)
+
+    range = r - l
+    res = res * range + l
+    return res
 
 
 @app.function

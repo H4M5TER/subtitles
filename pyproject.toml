@@ -26,6 +26,7 @@ dependencies = [
   "typer>=0.25.1",
   "wigglystuff>=0.5.9",
   "yt-dlp[default]>=2026.3.17",
+  "zh-core-web-md",
 ]
 
 [tool.uv.sources]
@@ -41,6 +42,7 @@ torchvision = [
 yt-dlp = { git = "https://github.com/yt-dlp/yt-dlp/" }
 en-core-web-md = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_md-3.8.0/en_core_web_md-3.8.0-py3-none-any.whl" }
 flash-attn = { url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.28/flash_attn-2.8.3+cu130torch2.10-cp312-cp312-win_amd64.whl" }
+zh-core-web-md = { url = "https://github.com/explosion/spacy-models/releases/download/zh_core_web_md-3.8.0/zh_core_web_md-3.8.0-py3-none-any.whl" }
 
 [[tool.uv.index]]
 name = "pytorch-cpu"

@@ -9,6 +9,7 @@ with app.setup:
 
     import re
     from pathlib import Path
+    from copy import deepcopy
     from typing import Optional
 
     import math
@@ -108,24 +109,48 @@ def prepare_batch(result_path: Path) -> tuple[WhisperResult, list["Span"]]:
     indices = sorted(indices)
     result.split_segment_by_index(result[0], indices)
     result.clamp_max()
+    # result.adjust_gaps(duration_threshold=0.5)
     return result, sents
 
 
 @app.cell
-def _(result):
-    [s.text for s in result.segments]
+def _(result, result_path, sents):
+    regrouped_result = regroup(result, sents, 40)
+    [s.text for s in regrouped_result.segments]
+    regrouped_result.to_srt_vtt(
+        str(result_path.with_suffix(".regroup.srt")), word_level=False
+    )
+    regrouped_result.save_as_json(str(result_path.with_suffix(".regroup.json")))
     return
 
 
-@app.cell(column=2)
+@app.function
+def regroup(
+    result: WhisperResult,
+    sents: "Span",
+    len_target: int = 40,
+):
+    def split(
+        result: WhisperResult,
+        seg_index: int,
+        word_index: int,
+    ):
+        segment = result[seg_index]
+        sent = sents[seg_index]
+        df = prepare(sent)
+        spacy_bounds = comp_dp(df, len_target)[0]
+        whisper_bounds = spacy_to_whisper(spacy_bounds, sent, segment)
+        result.split_segment_by_index(segment, whisper_bounds, reassign_ids=False)
+        return
+
+    result = deepcopy(result)
+    result.custom_operation("len=text", ">", len_target, split, word_level=False)
+    result.reassign_ids()
+    return result
+
+
+@app.cell(column=2, hide_code=True)
 def _():
-    result_path = mo.ui.text("")
-    use_input = mo.ui.switch(value=False, label="Use input")
-    mo.vstack([result_path, use_input])
-    return result_path, use_input
-
-
-@app.cell(hide_code=True)
 def _(result_path, use_input):
     result = []
     if not use_input.value:

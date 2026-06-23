@@ -9,6 +9,7 @@ with app.setup:
 
     import re
     from pathlib import Path
+    from functools import partial
     from copy import deepcopy
     from typing import Optional
 
@@ -43,55 +44,98 @@ def get_benepar_pipeline() -> spacy.Language:
 
 @app.cell(column=1, hide_code=True)
 def _():
-    widget_len_target = mo.ui.number(1, 100, value=50, step=1, label="Target chars")
-    widget_len_floor = mo.ui.number(1, 100, value=10, step=1, label="Floor chars")
+    widget_mult_cost = mo.ui.switch(
+        value=False, label="Multiply split penalty by length penalty"
+    )
+    widget_len_target = mo.ui.slider(
+        1, 100, 1, value=40, show_value=True, label="Target chars"
+    )
+    widget_short_scale = mo.ui.slider(
+        1, 10, 1, value=3, show_value=True, label="Short split scale"
+    )
 
-    widget_semantic = mo.ui.number(
-        0, 1000, value=100, step=1, label="Semantic weight (%)"
+    widget_semantic_weight = mo.ui.slider(
+        0, 1000, 1, value=100, show_value=True, label="Semantic weight (%)"
     )
-    widget_split_penalty = mo.ui.number(
-        0, 1000, value=100, step=1, label="Split penalty weight (%)"
+    widget_jump_weight = mo.ui.slider(
+        0, 1000, 1, value=100, show_value=True, label="Jump penalty weight (%)"
     )
-    widget_length = mo.ui.number(0, 1000, value=100, step=1, label="Length weight (%)")
+    widget_length_weight = mo.ui.slider(
+        0, 1000, 1, value=100, show_value=True, label="Length weight (%)"
+    )
 
     mo.vstack(
         [
-            mo.hstack([widget_len_target, widget_len_floor]),
-            mo.hstack([widget_semantic, widget_length, widget_split_penalty]),
+            mo.hstack([widget_mult_cost, widget_len_target, widget_short_scale]),
+            mo.hstack([widget_semantic_weight, widget_length_weight, widget_jump_weight]),
         ]
     )
     return (
-        widget_len_floor,
+        widget_jump_weight,
         widget_len_target,
-        widget_length,
-        widget_semantic,
-        widget_split_penalty,
+        widget_length_weight,
+        widget_mult_cost,
+        widget_semantic_weight,
+        widget_short_scale,
     )
 
 
 @app.cell
-def _(result, segment_select, sents, use_input):
-    if not use_input.value:
-        sent_id = segment_select.value
-        sent = sents[sent_id]
-        n_tokens = len(sent)
-        n_bounds = n_tokens - 1
-        segment = result[sent_id]
-    return n_tokens, segment, sent
+def _(
+    widget_jump_weight,
+    widget_len_target,
+    widget_length_weight,
+    widget_result_path,
+    widget_semantic_weight,
+    widget_text_input,
+):
+    use_input = widget_text_input.value.strip() != ""
+    result_path = Path(widget_result_path.value)
+
+    len_target = widget_len_target.value
+    semantic_weight = widget_semantic_weight.value / 100
+    length_weight = widget_length_weight.value / 100
+    jump_weight = widget_jump_weight.value / 100
+    return (
+        jump_weight,
+        len_target,
+        length_weight,
+        result_path,
+        semantic_weight,
+        use_input,
+    )
 
 
 @app.cell
-def _(sent, text_input, use_input):
-    if use_input.value:
-        df = prepare(text_input.value)
+def _(
+    result,
+    sents,
+    use_input,
+    widget_segment_select,
+    widget_text_input,
+):
+    if use_input:
+        nlp = get_benepar_pipeline()
+        doc = nlp(widget_text_input.value.strip())
+        sent = list(doc.sents)[0]
     else:
-        df = prepare(sent)
+        sent_id = widget_segment_select.value
+        sent = sents[sent_id]
+        segment = result[sent_id]
+        whisper_tokens = [wt.word for wt in segment.words]
+
+    n_tokens = len(sent)
+    n_bounds = n_tokens - 1
+    spacy_tokens = [t.text for t in sent]
+    df = prepare(sent)
     df
-    return (df,)
+    return df, segment, sent, spacy_tokens, whisper_tokens
 
 
 @app.function
-def prepare_batch(result_path: Path) -> tuple[WhisperResult, list["Span"]]:
+def prepare_batch(
+    result_path: Path,
+) -> tuple[WhisperResult, "Span"]:
     result = WhisperResult(str(result_path))
     result.reset()
     result.merge_all_segments()
@@ -151,124 +195,173 @@ def regroup(
 
 @app.cell(column=2, hide_code=True)
 def _():
-def _(result_path, use_input):
-    result = []
-    if not use_input.value:
-        result, sents = prepare_batch(Path(result_path.value))
-    segment_select = mo.ui.number(0, len(result), step=1, label="Segment index")
-    text_input = mo.ui.text_area(
-        value="",
+    widget_result_path = mo.ui.text("")
+    widget_text_input = mo.ui.text_area(
+        "The prevailing view of scientific popularization, both within academic circles and beyond, affirms that its objectives and procedures are unrelated to tasks of cognitive development and that its pertinence is by and large restricted to the lay public. Consistent with this view, popularization is frequently portrayed as a logical and hence inescapable consequence of a culture dominated by science-based products and procedures and by a scientistic ideology. On another level, it is depicted as a quasi-political device for chan­ nelling the energies of the general public along predetermined paths; examples of this are the nineteenth-century Industrial Revolution and the U. S. -Soviet space race. Alternatively, scientific popularization is described as a carefully contrived plan which enables scientists or their spokesmen to allege that scientific learn­ ing is equitably shared by scientists and non-scientists alike. This manoeuvre is intended to weaken the claims of anti-scientific protesters that scientists monopolize knowledge as a means of sustaining their social privileges. Pop­ ularization is also sometimes presented as a psychological crutch. This, in an era of increasing scientific specialisation, permits the researchers involved to believe that by transcending the boundaries of their narrow fields, their endeavours assume a degree of general cognitive importance and even extra­ scientific relevance. Regardless of the particular thrust of these different analyses it is important to point out that all are predicated on the tacit presupposition that scientific popularization belongs essentially to the realm of non-science, or only concerns the periphery of scientific activity.",
         label="输入句子",
         full_width=True,
     )
+    mo.vstack([widget_result_path, widget_text_input])
+    return widget_result_path, widget_text_input
 
-    mo.vstack([segment_select, text_input])
-    return result, segment_select, sents, text_input
+
+@app.cell(hide_code=True)
+def _(result_path):
+    if result_path.is_file():
+        result, sents = prepare_batch(result_path)
+        widget_segment_select = mo.ui.slider(
+            0,
+            len(result) - 1,
+            1,
+            debounce=True,
+            show_value=True,
+            label="Segment index",
+        )
+        widget_segment_select
+    return result, sents, widget_segment_select
 
 
-@app.cell
-def _(result, segment, segment_select, sent, spacy_bounds):
+@app.cell(hide_code=True)
+def _(segment, sent, spacy_bounds, use_input, whisper_tokens):
+    mo.stop(use_input)
+
     whisper_bounds = spacy_to_whisper(spacy_bounds, sent, segment)
-    whisper_group = (
-        pl.DataFrame([wt.word for wt in result[segment_select.value].words])
-        .with_row_index()
-        .with_columns(pl.col("index").cut(breaks=whisper_bounds).alias("group"))
-        .group_by("group", maintain_order=True)
-        .agg(pl.col("column_0").str.join(" ").alias("segment"))
+    whisper_segments = bounds_to_segments(
+        whisper_tokens,
+        whisper_bounds,
+        left_closed=False,
     )
-    whisper_group.select("segment").to_series().to_list()
-    # whisper_group
+    whisper_segments
     # whisper_bounds
     return
 
 
-@app.cell
-def _(df, spacy_bounds):
-    spacy_group = (
-        df.select("spacy_tokens")
-        .with_row_index()
-        .with_columns(
-            pl.col("index").cut(breaks=spacy_bounds, left_closed=True).alias("group")
-        )
-        .group_by("group", maintain_order=True)
-        .agg(pl.col("spacy_tokens").str.join(" ").alias("segment"))
+@app.cell(hide_code=True)
+def _(spacy_bounds, spacy_tokens):
+    spacy_segments = bounds_to_segments(
+        spacy_tokens,
+        spacy_bounds,
+        left_closed=True,
     )
-    spacy_group.select("segment").to_series().to_list()
-    # spacy_group
+    spacy_segments
     # spacy_bounds
     return
 
 
 @app.function
+def bounds_to_segments(
+    tokens: list[str],
+    bounds: list[int],
+    left_closed: bool,
+) -> list[str]:
+    group = (
+        pl.DataFrame(tokens)
+        .with_row_index()
+        .with_columns(
+            pl.col("index")
+            .cut(
+                breaks=bounds,
+                left_closed=left_closed,
+            )
+            .alias("group")
+        )
+        .group_by("group", maintain_order=True)
+        .agg(pl.col("column_0").str.join(" ").alias("segment"))
+    )
+    return group.select("segment").to_series().to_list()
+
+
+@app.function
 def spacy_to_whisper(
-    spacy_bounds: list[int], sent: list["Span"], segment: stable_whisper.Segment
+    spacy_bounds: list[int],
+    sent: "Span",
+    segment: stable_whisper.Segment,
 ) -> list[int]:
+    spacy_bounds = [i for i in spacy_bounds if 0 < i < len(sent)]
     char_len = [len(wordtiming.word) for wordtiming in segment.words]
-    cumsum = np.cumsum(char_len)
-    whisper_bounds = [
+    whisper_char_cumsum = np.cumsum(char_len)
+    spacy_start_char = [
         sent[i].idx - sent.start_char
         #       ^ doc level
         for i in spacy_bounds
     ]
-    whisper_bounds = [np.searchsorted(cumsum, i) for i in whisper_bounds]
-    whisper_bounds = [i for i in whisper_bounds if 0 <= i < len(segment.words)]
-    whisper_bounds = sorted(list(set(whisper_bounds)))
-    # unsort indices break splitting by stable_whisper
+    whisper_bounds = [np.searchsorted(whisper_char_cumsum, i) for i in spacy_start_char]
+    # remind: unsort indices make span overlapped
+    # when split using stable_whisper
     return whisper_bounds
 
 
 @app.cell(column=3, hide_code=True)
-def _(
-    bound_before_labels,
-    colorscale,
-    colorscale2,
-    transition,
-    transition_best,
-):
-    layout = dict(
-        width=800,
-        height=800,
-        autosize=False,
-        yaxis_scaleanchor="x",
+def _(bound_before_labels, colorscale, df, sorted_prev, transition):
+    heatmap = go.Figure(
+        layout=dict(
+            width=800,
+            height=800,
+        )
     )
-    transition_labels = bound_before_labels + ["EOS"]
 
-    heatmap1 = go.Figure(
+    transition_labels = bound_before_labels + ["EOS"]
+    zeroed_transition = np.nan_to_num(transition)
+    mirrored_transition = zeroed_transition + zeroed_transition.T
+    np.fill_diagonal(mirrored_transition, np.nan)
+
+    heatmap.add_trace(
         go.Heatmap(
-            z=pl.from_numpy(transition),
+            z=pl.from_numpy(mirrored_transition),
             x=transition_labels,
             y=transition_labels,
             colorscale=colorscale,
-        ),
-        layout=layout,
+            colorbar=dict(orientation="h"),
+        )
     )
-    heatmap2 = go.Figure(
-        go.Heatmap(
-            z=pl.from_numpy(transition_best),
-            x=transition_labels,
-            y=transition_labels,
-            colorscale=colorscale2,
-        ),
-        layout=layout,
-    )
-    mo.hstack([heatmap1, heatmap2])
+
+    html = ""
+    best_prev = [sorted_prev[i][0] for i in range(len(sorted_prev))]
+    for i, bound in enumerate(sorted_prev[-1][:4]):
+        if np.isnan(bound):
+            break
+        path = build_path(bound, best_prev)
+        path += [-1]
+        kth_segments = bounds_to_segments(
+            df.select("spacy_tokens").to_series().to_list(),
+            path,
+            left_closed=True,
+        )
+        cost = transition[-1][bound]
+        color = plotly.colors.carto.Vivid[i]
+        separator = '<br><span style="color: red;"> | </span>'
+        inner_html = separator.join(kth_segments)
+        html += f'<div style="color: {color};">{inner_html}</div>'
+
+        path = [transition_labels[i] for i in path]
+        path_i = path[1:]
+        path_j = path[:-1]
+        heatmap.add_trace(
+            go.Scatter(
+                mode="lines+markers",
+                name=f"第{i + 1}优路径",
+                line=dict(color=color),
+                marker=dict(size=20),
+                x=path_i + [None] + path_j,
+                y=path_j + [None] + path_i,
+            )
+        )
+
+    mo.hstack([mo.vstack([mo.Html(html)]), heatmap])
     return
 
 
 @app.cell
-def _(transition, transition_best):
-    quantiles = [0, 1, 2, 3, 5, 10, 25, 50, 75, 100]
-    colors = plotly.colors.sequential.Viridis
+def _(transition):
+    quantiles = [0, 1, 2, 5, 10, 25, 50]
+    colors = plotly.colors.sequential.Blues_r
+
+    assert len(quantiles) <= len(colors)
 
     scales = np.nanpercentile(transition.flatten(), quantiles)
     scales = np.interp(scales, (scales.min(), scales.max()), (0, 1))
     colorscale = list(zip(scales, colors))
-
-    scales2 = np.nanpercentile(transition_best.flatten(), quantiles)
-    scales2 = np.interp(scales2, (scales2.min(), scales2.max()), (0, 1))
-    colorscale2 = list(zip(scales2, colors))
-    # colorscale2 = colorscale
-    return colorscale, colorscale2
+    return (colorscale,)
 
 
 @app.cell
@@ -286,59 +379,35 @@ def _(sent):
     return
 
 
-@app.cell(column=4, hide_code=True)
-def _(
-    widget_len_floor,
-    widget_len_target,
-    widget_length,
-    widget_semantic,
-    widget_split_penalty,
-):
-    len_target = widget_len_target.value
-    len_floor = widget_len_floor.value
-
-    semantic_weight = widget_semantic.value / 100
-    length_weight = widget_length.value / 100
-    split_penalty_weight = widget_split_penalty.value / 100
-    return (
-        len_floor,
-        len_target,
-        length_weight,
-        semantic_weight,
-        split_penalty_weight,
-    )
-
-
-@app.cell
+@app.cell(column=4)
 def _(
     df,
-    len_floor,
+    jump_weight,
     len_target,
     length_weight,
-    n_tokens,
     semantic_weight,
-    split_penalty_weight,
+    widget_mult_cost,
+    widget_short_scale,
 ):
-    spacy_bounds, transition, dp, prev = comp_dp(
-        df, len_target, len_floor, semantic_weight, length_weight, split_penalty_weight
+    spacy_bounds, transition, sorted_prev = comp_dp(
+        df,
+        len_target,
+        short_scale=widget_short_scale.value,
+        mult_cost=widget_mult_cost.value,
+        semantic_weight=semantic_weight,
+        length_weight=length_weight,
+        split_penalty_weight=jump_weight,
     )
-    transition_best = [
-        [transition[i][j] if prev[j] == i else np.nan for j in range(n_tokens + 1)]
-        for i in range(n_tokens + 1)
-    ]
-    transition_best = np.array(transition_best)
-    return spacy_bounds, transition
+    return sorted_prev, spacy_bounds, transition
 
 
 @app.cell
 def _(df):
-    bound_before_labels = [
-        f'{i},"{token}",' for i, token in enumerate(df["spacy_tokens"].to_list())
-    ]
+    bound_before_labels = [f'{i},"{token}",' for i, token in enumerate(spacy_tokens)]
     return (bound_before_labels,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(bound_before_labels, df):
     px.line(
         df,
@@ -365,11 +434,12 @@ def _(bound_before_labels, df):
 def comp_dp(
     df: pl.DataFrame,
     len_target: int,
-    len_floor: int,
+    short_scale: int = 3,
+    mult_cost: bool = False,
     semantic_weight: Optional[float] = 1,
     length_weight: Optional[float] = 1,
     split_penalty_weight: Optional[float] = 1,
-) -> tuple[list[int], np.ndarray, list[float], list[int]]:
+):
     n_tokens = df.shape[0]
     n_bounds = n_tokens + 1  # 含首尾
     cumsum = df.select("spacy_cumsum").to_series().to_list()
@@ -393,41 +463,52 @@ def comp_dp(
             jump = jumps[last_split_bound] + 1
             cost = split_penalty_weight * jump
             n_char = cumsum[cur_split_bound] - cumsum[last_split_bound]
-            len_penalty = length_weight * len_cost(n_char, len_target)
-            if False:
+            len_penalty = length_weight * len_cost(n_char, len_target, short_scale)
+            if mult_cost and split_penalty_weight > 0:
                 cost *= 1 + len_penalty
             else:
-                cost += len_penalty
+                cost = cost + len_penalty
 
             semantic_cost = semantic_weight * semantic_costs[last_split_bound]
             # 注意这是上一个切分点的语义成本
             cost -= semantic_cost
 
             cost += best[last_split_bound]
-            transition[last_split_bound][cur_split_bound] = cost
             transition[cur_split_bound][last_split_bound] = cost
             if cost < best[cur_split_bound]:
                 best[cur_split_bound] = cost
                 prev[cur_split_bound] = last_split_bound
                 jumps[cur_split_bound] = jump
 
-    cur = -1
-    boundaries = []
-    while prev[cur] > 0:
-        boundaries.append(prev[cur])
-        cur = prev[cur]
-    boundaries.reverse()
+    sorted_prev = [sort_cost(transition[i]) for i in range(len(transition))]
+    best_prev = [sorted_prev[i][0] for i in range(len(sorted_prev))]
+    boundaries = build_path(-1, best_prev)
 
-    return boundaries, transition, best, prev
+    return boundaries, transition, sorted_prev
+
+
+@app.function
+def build_path(end: int, prev: list[int]) -> list[int]:
+    cur = end
+    path = [end]
+    while prev[cur] >= 0:
+        path.append(prev[cur])
+        cur = prev[cur]
+    path.reverse()
+    return path
+
+
+@app.function
+def sort_cost(row: list[float]) -> list[int]:
+    filtered = filter(lambda x: not np.isnan(x[1]), enumerate(row))
+    sorted_ = sorted(filtered, key=lambda x: x[1])
+    result = [i for i, v in sorted_]
+    result += (len(row) - len(result)) * [np.nan]
+    return result
 
 
 @app.function(column=5)
-def prepare(sent):
-    if isinstance(sent, str):
-        nlp = get_benepar_pipeline()
-        doc = nlp(sent.strip())
-        sent = list(doc.sents)[0]
-
+def prepare(sent: "Span"):
     n_tokens = len(sent)
     df = pl.DataFrame(
         {
@@ -521,23 +602,9 @@ def comp_dist_depth(sent) -> list[int]:
 
 @app.cell(hide_code=True)
 def _(len_target):
-    from functools import partial
-
-    len_cost_col = (
-        pl.col("n_char")
-        .map_elements(
-            partial(
-                len_cost,
-                target=len_target,
-                # floor=len_floor,
-            )
-        )
-        .alias("len_cost")
-    )
-    len_cost_map = pl.DataFrame(
-        {"n_char": range(1, len_target * 2)},
-    ).with_columns([len_cost_col])
-    px.line(len_cost_map, x="n_char", y="len_cost")
+    range_n_char = range(0, len_target * 2 + 1)
+    len_cost_map = [len_cost(n_char, len_target) for n_char in range_n_char]
+    px.line(x=range_n_char, y=len_cost_map)
     return
 
 
@@ -545,10 +612,13 @@ def _(len_target):
 def len_cost(
     n_char: int,
     target: int,
+    short_scale: int = 3,
 ) -> float:
     relative = n_char / target - 1
     if relative < 0:
-        relative *= 2  # 提前在 1/2 处就达到 1
+        relative *= short_scale
+        # 提前在 (n-1)/n 处就达到原本峰值 1
+        # 新峰值提高到 short_scale²
     cost = relative**2
     return cost
 

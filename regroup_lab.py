@@ -36,13 +36,34 @@ with app.setup:
 
 @app.function
 @mo.cache
-def get_benepar_pipeline() -> spacy.Language:
-    nlp = spacy.load("en_core_web_md")
-    nlp.add_pipe("benepar", config={"model": "benepar_en3_large"})
+def get_benepar_pipeline(model_name: str) -> spacy.Language:
+    dict_name = dict(
+        benepar_en3_large="en_core_web_md",
+        benepar_en3="en_core_web_md",
+        benepar_zh2="zh_core_web_md",
+    )[model_name]
+    nlp = spacy.load(dict_name)
+    nlp.add_pipe("benepar", config={"model": model_name})
     return nlp
 
 
 @app.cell(column=1, hide_code=True)
+def _():
+    model_list = [
+        "benepar_en3_large",
+        "benepar_en3",
+        "benepar_zh2",
+    ]
+    widget_model_name = mo.ui.dropdown(
+        model_list,
+        value=model_list[0],
+        label="Select model",
+    )
+    widget_model_name
+    return (widget_model_name,)
+
+
+@app.cell(hide_code=True)
 def _():
     widget_mult_cost = mo.ui.switch(
         value=False, label="Multiply split penalty by length penalty"
@@ -85,14 +106,18 @@ def _(
     widget_jump_weight,
     widget_len_target,
     widget_length_weight,
+    widget_model_name,
     widget_result_path,
     widget_semantic_weight,
     widget_text_input,
 ):
     use_input = widget_text_input.value.strip() != ""
+    model_name = widget_model_name.value
     result_path = Path(widget_result_path.value)
 
     len_target = widget_len_target.value
+    if model_name == "benepar_zh2":
+        len_target //= 2
     semantic_weight = widget_semantic_weight.value / 100
     length_weight = widget_length_weight.value / 100
     jump_weight = widget_jump_weight.value / 100
@@ -100,6 +125,7 @@ def _(
         jump_weight,
         len_target,
         length_weight,
+        model_name,
         result_path,
         semantic_weight,
         use_input,
@@ -108,6 +134,7 @@ def _(
 
 @app.cell
 def _(
+    model_name,
     result,
     sents,
     use_input,
@@ -115,7 +142,7 @@ def _(
     widget_text_input,
 ):
     if use_input:
-        nlp = get_benepar_pipeline()
+        nlp = get_benepar_pipeline(model_name)
         doc = nlp(widget_text_input.value.strip())
         sent = list(doc.sents)[0]
     else:
@@ -135,12 +162,13 @@ def _(
 @app.function
 def prepare_batch(
     result_path: Path,
+    model_name: str,
 ) -> tuple[WhisperResult, "Span"]:
     result = WhisperResult(str(result_path))
     result.reset()
     result.merge_all_segments()
 
-    nlp = get_benepar_pipeline()
+    nlp = get_benepar_pipeline(model_name)
     doc = nlp(result.text)
     sents = list(doc.sents)
     indices: list[int] = []
@@ -206,9 +234,9 @@ def _():
 
 
 @app.cell(hide_code=True)
-def _(result_path):
+def _(model_name, result_path):
     if result_path.is_file():
-        result, sents = prepare_batch(result_path)
+        result, sents = prepare_batch(result_path, model_name)
         widget_segment_select = mo.ui.slider(
             0,
             len(result) - 1,
@@ -402,7 +430,7 @@ def _(
 
 
 @app.cell
-def _(df):
+def _(spacy_tokens):
     bound_before_labels = [f'{i},"{token}",' for i, token in enumerate(spacy_tokens)]
     return (bound_before_labels,)
 

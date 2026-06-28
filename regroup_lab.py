@@ -33,10 +33,10 @@ def get_benepar_pipeline() -> spacy.Language:
     return nlp
 
 
-@app.cell(column=1)
+@app.cell(column=1, hide_code=True)
 def _():
-    widget_len_target = mo.ui.number(1, 100, value=40, step=1, label="Target chars")
-    widget_len_floor = mo.ui.number(1, 100, value=15, step=1, label="Floor chars")
+    widget_len_target = mo.ui.number(1, 100, value=50, step=1, label="Target chars")
+    widget_len_floor = mo.ui.number(1, 100, value=10, step=1, label="Floor chars")
 
     widget_semantic = mo.ui.number(
         0, 1000, value=100, step=1, label="Semantic weight (%)"
@@ -45,16 +45,13 @@ def _():
         0, 1000, value=100, step=1, label="Split penalty weight (%)"
     )
 
-    use_input = mo.ui.switch(value=False, label="Use input")
-
     mo.vstack(
         [
-            mo.hstack([use_input, widget_len_target, widget_len_floor]),
+            mo.hstack([widget_len_target, widget_len_floor]),
             mo.hstack([widget_semantic, widget_split_penalty]),
         ]
     )
     return (
-        use_input,
         widget_len_floor,
         widget_len_target,
         widget_semantic,
@@ -70,7 +67,7 @@ def _(result, segment_select, sents, use_input):
         n_tokens = len(sent)
         n_bounds = n_tokens - 1
         segment = result[sent_id]
-    return segment, sent
+    return n_tokens, segment, sent
 
 
 @app.cell
@@ -113,9 +110,10 @@ def _(result):
 
 @app.cell(column=2)
 def _():
-    result_path = mo.ui.text()
-    result_path
-    return (result_path,)
+    result_path = mo.ui.text("")
+    use_input = mo.ui.switch(value=False, label="Use input")
+    mo.vstack([result_path, use_input])
+    return result_path, use_input
 
 
 @app.cell
@@ -185,7 +183,6 @@ def spacy_to_whisper(
 
 @app.cell(column=3)
 def _(
-    df,
     widget_len_floor,
     widget_len_target,
     widget_semantic,
@@ -193,13 +190,28 @@ def _(
 ):
     len_target = widget_len_target.value
     len_floor = widget_len_floor.value
-    semantic_ratio = widget_semantic.value / 100
-    split_penalty_ratio = widget_split_penalty.value / 100
-    semantic_weight = len_target * semantic_ratio
-    split_penalty_base = len_target * split_penalty_ratio
 
+    semantic_weight = widget_semantic.value / 100
+    split_penalty_weight = widget_split_penalty.value / 100
+    return (
+        len_floor,
+        len_target,
+        semantic_weight,
+        split_penalty_weight,
+    )
+
+
+@app.cell
+def _(
+    df,
+    len_floor,
+    len_target,
+    n_tokens,
+    semantic_weight,
+    split_penalty_weight,
+):
     spacy_bounds, transition, dp, prev = comp_dp(
-        df, len_target, len_floor, semantic_weight, split_penalty_base
+        df, len_target, len_floor, semantic_weight, split_penalty_weight
     )
     transition = pl.from_numpy(
         transition,
@@ -218,23 +230,36 @@ def _(
     )
     px.imshow(transition)
     # transition
-    return len_floor, len_target, spacy_bounds
+    return spacy_bounds, transition
 
 
 @app.cell
 def _(df):
-    fig = px.line(
+    bound_before_labels = [
+        f'{i},"{token}",' for i, token in enumerate(df["spacy_tokens"].to_list())
+    ]
+    return (bound_before_labels,)
+
+
+@app.cell
+def _(bound_before_labels, df):
+    px.line(
         df,
-        x="x",
+        x=bound_before_labels,
         # y=[c for c in df.columns if c != "x"],
         y=[
-            "distance",
-            "depth",
-            "norm_semantic_cost",
+            prefix + c
+            for c in (
+                "dist_tree",
+                "dist_depth",
+                "semantic_cost",
+            )
+            for prefix in (
+                "",
+                "z_",
+            )
         ],
-        hover_data="spacy_tokens",
     )
-    fig
     return
 
 

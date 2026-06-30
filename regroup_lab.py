@@ -431,17 +431,9 @@ def _(bound_before_labels, df):
         x=bound_before_labels,
         # y=[c for c in df.columns if c != "x"],
         y=[
-            prefix + c
-            for c in (
-                "dist_tree",
-                "dist_depth",
-                "semantic_cost",
-            )
-            for prefix in (
-                "",
-                "norm_",
-                "z_",
-            )
+            "dist_tree",
+            "lca_depth",
+            "semantic_reward",
         ],
     )
     return
@@ -462,7 +454,7 @@ def comp_dp(
     cumsum = df.select("spacy_cumsum").to_series().to_list()
     cumsum = [0] + cumsum  # 填充到 1-indexed 和 cur_split_bound 对齐
     n_char_total = cumsum[-1]
-    semantic_costs = df.select("norm_semantic_cost").to_series().to_list()
+    semantic_rewards = df.select("semantic_reward").to_series().to_list()
     # 代表第 i 个边界(含首)的语义成本, 0-indexed
     # 或代表以第 i 个 token 之后作为分割边界的语义成本, 1-indexed
     split_penalty_weight *= len_target / n_char_total
@@ -486,9 +478,9 @@ def comp_dp(
             else:
                 cost = cost + len_penalty
 
-            semantic_cost = semantic_weight * semantic_costs[last_split_bound]
+            semantic_reward = semantic_weight * semantic_rewards[last_split_bound]
             # 注意这是上一个切分点的语义成本
-            cost -= semantic_cost
+            cost -= semantic_reward
 
             cost += best[last_split_bound]
             transition[cur_split_bound][last_split_bound] = cost
@@ -526,38 +518,28 @@ def sort_cost(row: list[float]) -> list[int]:
 
 @app.function(column=5)
 def prepare(sent: "Span"):
-    n_tokens = len(sent)
-    df = pl.DataFrame(
-        {
-            "x": range(n_tokens),
-            "dist_tree": comp_dist_tree(sent),
-            "dist_depth": comp_dist_depth(sent),
-            "spacy_tokens": [t.text for t in sent],
-        }
+    return (
+        pl.DataFrame(
+            {
+                "x": range(len(sent)),
+                "dist_tree": comp_dist_tree(sent),
+                "lca_depth": comp_lca_depth(sent),
+                "spacy_tokens": [t.text for t in sent],
+            }
+        )
+        .with_columns([pl.col("spacy_tokens").str.len_chars().alias("spacy_chars")])
+        .with_columns([pl.col("spacy_chars").cum_sum().alias("spacy_cumsum")])
+        .with_columns(
+            [
+                pds.z_normalize(
+                    pl.col("dist_tree")
+                    # / (pl.col("lca_depth") + 4)
+                    * (1 - minmax_normalize("lca_depth"))
+                    # * (pds.z_normalize("lca_depth")) * -1
+                ).alias("semantic_reward")
+            ]
+        )
     )
-    df = df.with_columns(
-        [
-            pl.col("spacy_tokens").str.len_chars().alias("spacy_chars"),
-            (pl.col("dist_tree") + pl.col("dist_depth")).alias("semantic_cost"),
-            minmax_normalize("dist_tree").alias("norm_dist_tree"),
-            minmax_normalize("dist_depth").alias("norm_dist_depth"),
-            pds.z_normalize("dist_tree").alias("z_dist_tree"),
-            pds.z_normalize("dist_depth").alias("z_dist_depth"),
-        ]
-    )
-    df = df.with_columns(
-        [
-            pl.col("spacy_chars").cum_sum().alias("spacy_cumsum"),
-            minmax_normalize(
-                pl.col("dist_tree") + pl.col("dist_depth"),
-            ).alias("norm_semantic_cost"),
-            pds.z_normalize(
-                pl.col("dist_tree") + pl.col("dist_depth"),
-            ).alias("z_semantic_cost"),
-            # z_score 会丢失零点
-        ]
-    )
-    return df
 
 
 @app.function
@@ -587,7 +569,12 @@ def comp_dist_tree(sent) -> list[int]:
     for i in range(n_bounds):
         path_l = tree.leaf_treeposition(i)
         path_r = tree.leaf_treeposition(i + 1)
-        lca_depth = sum(1 for a, b in zip(path_l, path_r) if a == b)
+        lca_depth = 0
+        for a, b in zip(path_l, path_r):
+            if a == b:
+                lca_depth += 1
+            else:
+                break
         len_l = len(path_l) - lca_depth
         len_r = len(path_r) - lca_depth
         dist = len_l + len_r
@@ -617,12 +604,33 @@ def comp_dist_depth(sent) -> list[int]:
     return np.abs(distances)
 
 
-@app.cell(hide_code=True)
-def _(len_target):
-    range_n_char = range(0, len_target * 2 + 1)
-    len_cost_map = [len_cost(n_char, len_target) for n_char in range_n_char]
-    px.line(x=range_n_char, y=len_cost_map)
-    return
+@app.function
+def comp_lca_depth(sent) -> list[int]:
+    tree = ParentedTree.fromstring(sent._.parse_string)
+    leaves = tree.leaves()
+    # sent 以空格为第一个 token 时，tree.leaves 并不会包含空格
+    # 因此少一个 token，导致 n_leaves = n_tokens + 1
+    # 这其实是非常奇怪的，因为 tree 里仍然存在空格
+    n_leaves = len(leaves)
+    n_tokens = len(sent)
+    n_bounds = n_leaves - 1
+    depths = []
+    for i in range(n_bounds):
+        path_l = tree.leaf_treeposition(i)
+        path_r = tree.leaf_treeposition(i + 1)
+        lca_depth = 0
+        for a, b in zip(path_l, path_r):
+            if a == b:
+                lca_depth += 1
+            else:
+                break
+        depths.append(lca_depth)
+
+    leading_space = sent[0].text.strip() == ""
+    leading_space &= n_leaves + 1 == n_tokens
+    if leading_space:
+        depths = [0] + depths
+    return [0] + depths
 
 
 @app.function
@@ -638,6 +646,14 @@ def len_cost(
         # 新峰值提高到 short_scale²
     cost = relative**2
     return cost
+
+
+@app.cell(hide_code=True)
+def _(len_target):
+    range_n_char = range(0, max(len_target * 2 + 1, 100))
+    len_cost_map = [len_cost(n_char, len_target) for n_char in range_n_char]
+    px.line(x=range_n_char, y=len_cost_map)
+    return
 
 
 if __name__ == "__main__":

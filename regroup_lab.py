@@ -378,12 +378,11 @@ def _(bound_before_labels, colorscale, df, sorted_prev, transition):
 
 @app.cell
 def _(transition):
-    quantiles = [0, 1, 2, 5, 10, 25, 50]
     colors = plotly.colors.sequential.Blues_r
+    quantiles = range(0, len(colors) * 10, 10)
 
-    assert len(quantiles) <= len(colors)
-
-    scales = np.nanpercentile(transition.flatten(), quantiles)
+    scales = np.nanpercentile(np.log(transition.flatten()), quantiles)
+    scales = np.exp(scales)
     scales = np.interp(scales, (scales.min(), scales.max()), (0, 1))
     colorscale = list(zip(scales, colors))
     return (colorscale,)
@@ -394,13 +393,6 @@ def _(sent):
     append(sent._.parse_string)
     root = ParentedTree.fromstring(sent._.parse_string)
     append(root)  # need svgling
-    root.pretty_print()
-    return
-
-
-@app.cell
-def _(sent):
-    mo.Html(displacy.render(sent, style="dep"))
     return
 
 

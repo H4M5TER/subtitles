@@ -142,8 +142,7 @@ def _(
     widget_text_input,
 ):
     if use_input:
-        nlp = get_benepar_pipeline(model_name)
-        doc = nlp(widget_text_input.value.strip())
+        doc = nlp(widget_text_input.value, model_name)
         sent = list(doc.sents)[0]
     else:
         sent_id = widget_segment_select.value
@@ -160,6 +159,15 @@ def _(
 
 
 @app.function
+@mo.cache
+def nlp(text, model_name):
+    nlp = get_benepar_pipeline(model_name)
+    doc = nlp(text.strip())
+    return doc
+
+
+@app.function
+@mo.cache
 def prepare_batch(
     result_path: Path,
     model_name: str,
@@ -168,8 +176,7 @@ def prepare_batch(
     result.reset()
     result.merge_all_segments()
 
-    nlp = get_benepar_pipeline(model_name)
-    doc = nlp(result.text)
+    doc = nlp(result.text, model_name)
     sents = list(doc.sents)
     indices: list[int] = []
     for s in set(s.text for s in sents):

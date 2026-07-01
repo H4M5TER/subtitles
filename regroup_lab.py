@@ -10,6 +10,7 @@ with app.setup:
     import re
     from pathlib import Path
     from functools import partial
+    from itertools import chain
     from copy import deepcopy
     from typing import Optional
 
@@ -179,13 +180,23 @@ def prepare_batch(
     doc = nlp(result.text, model_name)
     sents = list(doc.sents)
     indices: list[int] = []
-    for s in set(s.text for s in sents):
-        matches = result.find(re.escape(s))
-        for match in matches:
-            word_indices = match.word_indices
-            indices.append(word_indices[0][-1])
-    indices = list(set(indices))
-    indices = sorted(indices)
+    assert len(sents) == len(set(sents))
+
+    char_to_word = list(chain.from_iterable([[i] * len(w.word) for i, w in enumerate(result[0].words)]))
+    assert len(char_to_word) == len(result.text)
+
+    end = 0
+    for sent in sents:
+        pattern = re.compile(r"\s*" + re.escape(sent.text))
+        match = pattern.match(result.text, end)
+        start, end = match.span()
+        word_indices = set(char_to_word[start:end])
+        if end >= len(char_to_word):
+            break
+        split_index = char_to_word[end - 1]
+        indices.append(split_index)
+    assert len(indices) == len(sents) - 1
+    
     result.split_segment_by_index(result[0], indices)
     result.clamp_max()
     # result.adjust_gaps(duration_threshold=0.5)

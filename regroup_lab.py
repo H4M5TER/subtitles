@@ -453,7 +453,7 @@ def _(bound_before_labels, df):
         # y=[c for c in df.columns if c != "x"],
         y=[
             "dist_tree",
-            "lca_depth",
+            "rel_lca_depth",
             "semantic_reward",
         ],
     )
@@ -548,14 +548,32 @@ def prepare(sent: "Span"):
                 "spacy_tokens": [t.text for t in sent],
             }
         )
-        .with_columns([pl.col("spacy_tokens").str.len_chars().alias("spacy_chars")])
-        .with_columns([pl.col("spacy_chars").cum_sum().alias("spacy_cumsum")])
         .with_columns(
             [
-                pds.z_normalize(
+                pl.col("lca_depth").filter(pl.col("x") < pl.col("x").max())
+                .cum_min(reverse=True).append(0)
+                .alias("reverse_cum_min_lca_depth"),
+                pl.col("spacy_tokens").str.len_chars().alias("spacy_chars"),
+            ]
+        )
+        .with_columns(
+            [
+                (pl.col("lca_depth") - pl.col("reverse_cum_min_lca_depth")).alias(
+                    "rel_lca_depth"
+                ),
+                pl.col("spacy_chars").cum_sum().alias("spacy_cumsum"),
+            ]
+        )
+        .with_columns(
+            [
+                # (
+                minmax_normalize(
+                # pds.z_normalize(
                     pl.col("dist_tree")
                     # / (pl.col("lca_depth") + 4)
-                    * (1 - minmax_normalize("lca_depth"))
+                    / (pl.col("rel_lca_depth") + 1)
+                    # / (pl.col("lca_depth") - pl.col("reverse_cum_min_lca_depth") + 1)
+                    # * (1 - minmax_normalize("lca_depth"))
                     # * (pds.z_normalize("lca_depth")) * -1
                 ).alias("semantic_reward")
             ]

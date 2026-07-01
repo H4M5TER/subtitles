@@ -170,10 +170,9 @@ def nlp(text, model_name):
 @app.function
 @mo.cache
 def prepare_batch(
-    result_path: Path,
+    result: WhisperResult,
     model_name: str,
 ) -> tuple[WhisperResult, "Span"]:
-    result = WhisperResult(str(result_path))
     result.reset()
     result.merge_all_segments()
 
@@ -205,12 +204,13 @@ def prepare_batch(
 
 @app.cell
 def _(result, result_path, sents):
-    regrouped_result = regroup(result, sents, 40)
-    [s.text for s in regrouped_result.segments]
+    result.to_srt_vtt(str(result_path.with_suffix(".fullsent.srt")), word_level=False)
+    regrouped_result = regroup(result, sents, 50)
     regrouped_result.to_srt_vtt(
         str(result_path.with_suffix(".regroup.srt")), word_level=False
     )
     regrouped_result.save_as_json(str(result_path.with_suffix(".regroup.json")))
+    [s.text for s in regrouped_result.segments]
     return
 
 
@@ -254,16 +254,16 @@ def _():
 @app.cell(hide_code=True)
 def _(model_name, result_path):
     if result_path.is_file():
-        result, sents = prepare_batch(result_path, model_name)
-        widget_segment_select = mo.ui.slider(
+        result = WhisperResult(str(result_path))
+        result, sents = prepare_batch(result, model_name)
+        widget_segment_select = mo.ui.number(
             0,
             len(result) - 1,
             1,
             debounce=True,
-            show_value=True,
             label="Segment index",
         )
-        widget_segment_select
+        append(widget_segment_select)
     return result, sents, widget_segment_select
 
 
@@ -332,6 +332,7 @@ def spacy_to_whisper(
         for i in spacy_bounds
     ]
     whisper_bounds = [np.searchsorted(whisper_char_cumsum, i) for i in spacy_start_char]
+    # whisper_bounds = list(set(whisper_bounds))
     # remind: unsort indices make span overlapped
     # when split using stable_whisper
     return whisper_bounds
@@ -436,6 +437,7 @@ def _(
         length_weight=length_weight,
         split_penalty_weight=jump_weight,
     )
+    transition = np.clip(transition, None, 50)
     return sorted_prev, spacy_bounds, transition
 
 
@@ -672,7 +674,7 @@ def comp_lca_depth(sent) -> list[int]:
     return [0] + depths
 
 
-@app.function
+@app.function(column=6)
 def len_cost(
     n_char: int,
     target: int,
@@ -684,6 +686,7 @@ def len_cost(
         # 提前在 (n-1)/n 处就达到原本峰值 1
         # 新峰值提高到 short_scale²
     cost = relative**2
+    # cost = math.cosh(relative * 4) - 1
     return cost
 
 
